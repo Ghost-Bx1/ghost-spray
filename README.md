@@ -1,155 +1,181 @@
 # Ghost-Spray
 
-**Password Spraying & Credential Attacks**  
-By Gh0st-Bx1 | github.com/Ghost-Bx1
+> Credential attack toolkit - password spraying, credential stuffing, default credential testing, hash cracking, and encrypted vault.
+
+```
+  GHOST-SPRAY  v1.0.0  |  Password Spraying & Credential Attacks
+  By Gh0st-Bx1         |  github.com/Ghost-Bx1
+```
+
+![Python](https://img.shields.io/badge/Python-3.7%2B-blue?style=flat-square)
+![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-lightgrey?style=flat-square)
+![Category](https://img.shields.io/badge/Category-Credential%20Attacks-red?style=flat-square)
 
 ---
 
-## Descricao
+## Overview
 
-Ghost-Spray e uma ferramenta de ataques de credenciais com password spraying inteligente, credential stuffing, verificacao de senhas padrao, quebra de hash por dicionario+regras e vault local criptografado. Construido com stdlib Python 3 - sem dependencias externas.
+Ghost-Spray covers the full credential attack surface: one-password-at-a-time spraying with automatic lockout detection, credential stuffing from breach dumps, default credential testing for 40+ vendors, dictionary-based hash cracking with mutation rules, and a locally encrypted credential vault.
 
-## Recursos
+| Module     | Description                                                         |
+|------------|---------------------------------------------------------------------|
+| `spray`    | Password spraying - one password per round across all users         |
+| `stuff`    | Credential stuffing from breach dump files                          |
+| `defaults` | Default credential testing for 40+ known manufacturers             |
+| `hash`     | Hash cracking via dictionary + mutation rules (MD5 to SHA-512)      |
+| `vault`    | Manage the local encrypted credential vault                         |
 
-- **Password Spray** - Uma senha por vez para todos os usuarios (evita lockout)
-- **Credential Stuffing** - Suporte a breach DBs em multiplos formatos
-- **Default Credentials** - 40+ credenciais padrao de fabricantes conhecidos
-- **Hash Cracker** - Quebra MD5/SHA1/SHA256/SHA512 por dicionario + regras
-- **Lockout Detection** - Pausa automatica ao detectar possivel lockout
-- **Vault Criptografado** - Armazenamento local de credenciais com XOR + SHA-256
+---
 
-## Modos
+## Requirements
 
-### spray - Password Spraying
-
-```bash
-python ghost-spray.py spray -t <alvo> --userlist <arquivo> [opcoes]
+```
+Python 3.7+
+No external dependencies (stdlib only)
+paramiko        (optional - required for SSH spray)
 ```
 
-| Argumento | Descricao |
-|-----------|-----------|
-| `-t, --target` | URL ou host:porta |
-| `--protocol` | http, https, smtp, ldap, ssh (padrao: http) |
-| `--userlist` | Arquivo com lista de usuarios |
-| `--passlist` | Arquivo com lista de senhas (padrao: lista interna) |
-| `--delay` | Delay entre tentativas em segundos (padrao: 1.0) |
-| `--threads` | Threads simultaneas por senha (padrao: 3) |
-| `--vault-pass` | Senha do vault para salvar credenciais validas |
-| `-o, --output` | Salvar resultados em JSON |
+```bash
+pip install paramiko  # optional, SSH only
+```
+
+---
+
+## Installation
 
 ```bash
-# Spray HTTP Basic Auth
-python ghost-spray.py spray -t http://alvo.com/admin --protocol http \
-  --userlist usuarios.txt --delay 2.0
+git clone https://github.com/Ghost-Bx1/ghost-spray
+cd ghost-spray
+python ghost-spray.py --help
+```
 
-# Spray SMTP com lista de senhas customizada
-python ghost-spray.py spray -t mail.alvo.com:587 --protocol smtp \
-  --userlist emails.txt --passlist senhas.txt --delay 3.0 --vault-pass s3cr3t
+---
 
-# Spray LDAP
+## Usage
+
+### Password spray
+
+```bash
+# HTTP Basic Auth spray
+python ghost-spray.py spray -t http://target.com/admin --protocol http \
+    --userlist users.txt --delay 2.0
+
+# SMTP spray with custom password list
+python ghost-spray.py spray -t mail.target.com:587 --protocol smtp \
+    --userlist emails.txt --passlist passwords.txt --delay 3.0 --vault-pass s3cr3t
+
+# LDAP spray
 python ghost-spray.py spray -t 192.168.1.10:389 --protocol ldap \
-  --userlist usuarios.txt --threads 5
+    --userlist users.txt --threads 5
 ```
 
-### stuff - Credential Stuffing
+### Credential stuffing
 
 ```bash
-python ghost-spray.py stuff -t <alvo> --breach-file <arquivo> [opcoes]
+# Stuffing with breach dump
+python ghost-spray.py stuff -t http://target.com/login --breach-file dump.txt
+
+# With vault storage and JSON output
+python ghost-spray.py stuff -t http://target.com/api/auth \
+    --breach-file breach.json --vault-pass s3cr3t -o results.json
 ```
 
-Formatos suportados de breach DB:
-- `usuario:senha`
-- `email:senha`
-- `{"email":"...","password":"..."}` (JSON)
-- Separadores: `:` `;` `\t` `|`
+Supported breach dump formats: `user:pass`, `email:pass`, `{"email":"...","password":"..."}` JSON. Separators: `:` `;` `\t` `|`
+
+### Default credentials
 
 ```bash
-# Credential stuffing com breach DB
-python ghost-spray.py stuff -t http://alvo.com/login --breach-file dump.txt
-
-# Com vault e output JSON
-python ghost-spray.py stuff -t http://alvo.com/api/auth \
-  --breach-file breach.json --vault-pass s3cr3t -o achados.json
-```
-
-### defaults - Default Credentials
-
-```bash
-python ghost-spray.py defaults -t <alvo> --protocol <protocolo>
-```
-
-Fabricantes incluidos: D-Link, TP-Link, Netgear, Cisco, Juniper, Mikrotik, Ubiquiti, Hikvision, Dahua, Axis, VMware ESXi, Citrix, IPMI/BMC, PostgreSQL, MySQL, Redis, MongoDB, Jenkins, Tomcat, Grafana, Kibana, Jupyter, Jira, Confluence, e mais.
-
-```bash
-# Testar credenciais padrao em painel web
+# Test web panel defaults
 python ghost-spray.py defaults -t http://192.168.1.1/admin --protocol http
 
-# Testar credenciais padrao LDAP
+# Test LDAP defaults
 python ghost-spray.py defaults -t 192.168.1.10:389 --protocol ldap
 ```
 
-### hash - Hash Cracker
+Vendors covered: D-Link, TP-Link, Netgear, Cisco, Juniper, Mikrotik, Ubiquiti, Hikvision, Dahua, VMware ESXi, Citrix, IPMI/BMC, PostgreSQL, MySQL, Redis, MongoDB, Jenkins, Tomcat, Grafana, Kibana, Jupyter, Jira, Confluence, and more.
+
+### Hash cracking
 
 ```bash
-python ghost-spray.py hash --hash <hash> [--wordlist <arquivo>]
-```
-
-Tipos suportados: MD5 (32), SHA1 (40), SHA224 (56), SHA256 (64), SHA384 (96), SHA512 (128)
-
-Regras aplicadas automaticamente:
-- Capitalizacao, MAIUSCULA, minuscula
-- Sufixos numericos (1, 12, 123, 1234, 2024, 2025)
-- Simbolos (@, !, #)
-- Substituicoes leet (a->@, e->3, i->1, o->0)
-
-```bash
-# Quebrar MD5 com lista interna
+# Crack MD5 with built-in wordlist
 python ghost-spray.py hash --hash 5f4dcc3b5aa765d61d8327deb882cf99
 
-# Com wordlist customizada
-python ghost-spray.py hash --hash <sha256> --wordlist rockyou.txt --verbose
+# With custom wordlist
+python ghost-spray.py hash --hash <sha256_hash> --wordlist rockyou.txt --verbose
 ```
 
-### vault - Gerenciar Vault
+Supported types: MD5 (32), SHA1 (40), SHA224 (56), SHA256 (64), SHA384 (96), SHA512 (128).
+
+Mutation rules applied automatically: capitalization, suffixes (1, 12, 123, 2024, 2025), symbols (@, !, #), leet substitution (a->@, e->3, i->1, o->0).
+
+### Vault management
 
 ```bash
-python ghost-spray.py vault --action <acao> --vault-pass <senha>
-```
-
-| Acao | Descricao |
-|------|-----------|
-| `list` | Listar credenciais salvas |
-| `clear` | Limpar vault |
-| `export` | Exportar para vault_export.json |
-
-```bash
-# Listar credenciais no vault
+# List saved credentials
 python ghost-spray.py vault --action list --vault-pass s3cr3t
 
-# Exportar vault para JSON
+# Clear vault
+python ghost-spray.py vault --action clear --vault-pass s3cr3t
+
+# Export to JSON
 python ghost-spray.py vault --action export --vault-pass s3cr3t
 ```
 
-## Lockout Detection
-
-O Ghost-Spray monitora automaticamente tentativas falhas por usuario. Ao detectar 5+ falhas em 60 segundos para o mesmo usuario, pausa automaticamente por 300 segundos antes de continuar.
-
-Use `--delay` para adicionar espera adicional entre tentativas e reduzir o risco de lockout.
-
-## Vault de Credenciais
-
-As credenciais validas encontradas sao armazenadas em `ghost-spray.vault` com cifragem XOR + chave SHA-256 derivada da senha mestre. O vault e um arquivo local binario - sem credenciais em texto plano.
-
-## Requisitos
-
-- Python 3.7+
-- Stdlib apenas (socket, ssl, hashlib, threading, urllib, etc.)
-- SSH real requer `pip install paramiko` (opcional)
-
-## Aviso Legal
-
-Esta ferramenta foi desenvolvida para testes de seguranca autorizados, CTF, pesquisa e uso defensivo. Use apenas em sistemas que voce tem permissao para testar. Password spraying e credential stuffing sem autorizacao sao ilegais.
+The vault stores valid credentials in `ghost-spray.vault` using XOR cipher with a SHA-256 derived key. No plaintext credentials on disk.
 
 ---
 
-*Ghost-Spray v1.0.0 - Ghost Tools Arsenal*
+## Lockout Detection
+
+Ghost-Spray monitors failed attempts per user. When 5 or more failures are detected within 60 seconds for the same user, it automatically pauses for 300 seconds. Use `--delay` to add additional wait time between attempts.
+
+---
+
+## Reference
+
+### `spray` flags
+
+| Flag              | Description                                              |
+|-------------------|----------------------------------------------------------|
+| `-t / --target`   | URL or host:port                                         |
+| `--protocol`      | http, https, smtp, ldap, ssh (default: http)             |
+| `--userlist`      | File with list of usernames                              |
+| `--passlist`      | File with list of passwords (default: built-in list)     |
+| `--delay N`       | Delay between attempts in seconds (default: 1.0)         |
+| `--threads N`     | Concurrent threads per password (default: 3)             |
+| `--vault-pass`    | Vault master password to store valid credentials         |
+| `-o / --output`   | Save results to JSON                                     |
+
+### `stuff` flags
+
+| Flag              | Description                                              |
+|-------------------|----------------------------------------------------------|
+| `-t / --target`   | URL or host:port                                         |
+| `--breach-file`   | Breach dump file (user:pass or JSON)                     |
+| `--vault-pass`    | Vault master password                                    |
+| `-o / --output`   | Save results to JSON                                     |
+
+### `hash` flags
+
+| Flag              | Description                                              |
+|-------------------|----------------------------------------------------------|
+| `--hash`          | Hash to crack                                            |
+| `--wordlist FILE` | Custom wordlist (default: built-in)                      |
+| `--verbose`       | Show each attempt                                        |
+
+### `vault` flags
+
+| Flag              | Description                                              |
+|-------------------|----------------------------------------------------------|
+| `--action`        | list, clear, or export                                   |
+| `--vault-pass`    | Vault master password                                    |
+
+---
+
+## Disclaimer
+
+For use in authorized environments only. Penetration testing, CTF competitions, and offensive security research with explicit permission from the environment owner. Password spraying and credential stuffing without authorization are illegal. The author is not responsible for misuse.
+
+---
+
+**By [Gh0st-Bx1](https://github.com/Ghost-Bx1)**
