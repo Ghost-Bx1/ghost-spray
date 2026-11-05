@@ -1,6 +1,6 @@
 # Ghost-Spray
 
-> Credential attack toolkit - password spraying, credential stuffing, default credential testing, hash cracking, and encrypted vault.
+> Credential attack toolkit - password spraying, stuffing, default credentials, and hash cracking.
 
 ```
   GHOST-SPRAY  v1.0.0  |  Password Spraying & Credential Attacks
@@ -190,6 +190,23 @@ Improvements planned based on analysis of MSOLSpray, o365spray, Sprayhound and R
 | Medium | SSH proxy rotation | `--ssh user@host1,user@host2` round-robins connections through SSH tunnels per attempt |
 | Low | Ping Identity / PingFederate module | POST to `/as/authorization.oauth2` with common enterprise federation endpoints |
 | Low | Google Workspace module | Probe `accounts.google.com` with Workspace-specific user enumeration endpoint |
+
+## Ghost Toolkit
+
+| Tool | Description |
+|------|-------------|
+| [ghost-ad](https://github.com/Ghost-Bx1/ghost-ad) | Active Directory - LDAP, Kerberoasting, AS-REP Roasting, BloodHound-lite |
+| [ghost-cloud](https://github.com/Ghost-Bx1/ghost-cloud) | Cloud Security - AWS, Azure and GCP misconfiguration scanner |
+| [ghost-fuzz](https://github.com/Ghost-Bx1/ghost-fuzz) | Web Fuzzing - directory brute-force, parameter fuzzing, vhost enumeration |
+| [ghost-osint](https://github.com/Ghost-Bx1/ghost-osint) | OSINT - domain, email and IP intelligence from public sources |
+| [ghost-privesc](https://github.com/Ghost-Bx1/ghost-privesc) | Privilege Escalation - Linux privesc checker, 17 vectors, GTFOBins |
+| [ghost-recon](https://github.com/Ghost-Bx1/ghost-recon) | Reconnaissance - DNS, SSL, WAF, subdomain enumeration, email security |
+| [ghost-report](https://github.com/Ghost-Bx1/ghost-report) | Reporting - pentest report generator from any ghost-* JSON output |
+| [ghost-scan](https://github.com/Ghost-Bx1/ghost-scan) | Port Scanner - async TCP/UDP scanner with banner grabbing and CVE correlation |
+| [ghost-shell](https://github.com/Ghost-Bx1/ghost-shell) | Payload Generation - reverse shell and web shell generator, 25+ languages |
+| [ghost-spray](https://github.com/Ghost-Bx1/ghost-spray) | Credential Attacks - password spraying, stuffing, default credential testing |
+
+---
 
 ## Disclaimer
 
