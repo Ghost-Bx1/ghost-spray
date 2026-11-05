@@ -170,27 +170,6 @@ Ghost-Spray monitors failed attempts per user. When 5 or more failures are detec
 | `--action`        | list, clear, or export                                   |
 | `--vault-pass`    | Vault master password                                    |
 
----
-
-## Roadmap
-
-Improvements planned based on analysis of MSOLSpray, o365spray, Sprayhound and Ruler:
-
-| Priority | Feature | Description |
-|----------|---------|-------------|
-| High | Azure/O365 module | Spray `/common/oauth2/token` with PS app client_id; detect valid/MFA/locked from response |
-| High | Okta module | POST to `/api/v1/authn`, parse `status` field (SUCCESS/MFA_REQUIRED/LOCKED_OUT) |
-| High | Tenant recon (`--recon`) | Return tenant ID, federation config, SharePoint URL, MX - no login attempts made |
-| High | User enumeration (no lockout) | Azure Seamless SSO endpoint + OneDrive URL probe to confirm valid usernames before spraying |
-| High | Username generation | `--gen-users first.txt last.txt --pattern fi.ln` builds lists (j.smith, jsmith, john.smith) |
-| High | Resume capability | Persist tried user:pass to `~/.ghost-spray/tried.txt`; `--resume` skips already-tried pairs |
-| Medium | Jitter + lockout-delay | `--jitter 1-3` adds random seconds; `--lockout-delay 30` waits after detecting lockout |
-| Medium | MFA detection logging | Flag accounts returning MFA challenges separately; list as "valid but MFA-protected" |
-| Medium | Lockout-aware halt | Track lockout responses per user; global halt if >X% of users lock out in one round |
-| Medium | SSH proxy rotation | `--ssh user@host1,user@host2` round-robins connections through SSH tunnels per attempt |
-| Low | Ping Identity / PingFederate module | POST to `/as/authorization.oauth2` with common enterprise federation endpoints |
-| Low | Google Workspace module | Probe `accounts.google.com` with Workspace-specific user enumeration endpoint |
-
 ## Ghost Toolkit
 
 | Tool | Description |
