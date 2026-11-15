@@ -1072,14 +1072,38 @@ def gerar_html_spray(achados: list, output_path: str, modo: str = "spray"):
 # CLI / main
 # ──────────────────────────────────────────────────────────────────
 
+_SPRAY_HELP = """\033[92mComandos disponiveis:\033[0m
+  \033[1mspray\033[0m              Password spraying - uma senha, todos os usuarios
+  \033[1mstuffing\033[0m           Credential stuffing - pares user:pass de vazamentos
+  \033[1mdefault-pass\033[0m       Testar senhas padrao em servicos (SSH/HTTP/SMTP/LDAP)
+  \033[1mhash-crack\033[0m         Quebra de hashes MD5/SHA1/SHA256/SHA512 por wordlist
+  \033[1mvault\033[0m              Gerenciar vault de credenciais encontradas
+  \033[1mkerberoast\033[0m         Kerberoasting via AS-REQ sem autenticacao
+
+\033[92mProtocolos suportados:\033[0m
+  http  https  smtp  ldap  ssh  owa  o365  okta  smb
+
+\033[92mExemplos:\033[0m
+  python ghost-spray.py spray -t https://app.com --userlist users.txt --passlist pass.txt
+  python ghost-spray.py spray -t alvo.com --protocol o365 --userlist users.txt --delay 2
+  python ghost-spray.py stuffing -t https://login.com --breach-file dump.txt
+  python ghost-spray.py default-pass -t 192.168.1.1 --protocol ssh
+  python ghost-spray.py hash-crack --hash 5f4dcc3b5aa765d61d8327deb882cf99
+  python ghost-spray.py kerberoast --dc 192.168.1.10 --domain corp.local --userlist users.txt
+
+\033[2mUse: python ghost-spray.py <comando> --help  para opcoes de cada comando\033[0m
+"""
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="ghost-spray",
-        description=f"Ghost-Spray v{VERSAO} - Password Spraying & Credential Attacks | By Gh0st-Bx1",
-        formatter_class=argparse.RawTextHelpFormatter,
+        description=f"Ghost-Spray v{VERSAO} - Password Spraying & Credential Attacks  |  By Gh0st-Bx1",
+        epilog=_SPRAY_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    sub = parser.add_subparsers(dest="modo")
+    sub = parser.add_subparsers(dest="modo", title=argparse.SUPPRESS, metavar="comando")
 
     # spray
     p_spray = sub.add_parser("spray", help="Password spraying (uma senha por vez, todos os usuarios)")
